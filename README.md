@@ -8,6 +8,9 @@ A bridge adpater for Nimf and GNOME Shell 42 or 46 Wayland.
 
 ## Install
 ```sh
+sudo apt update
+sudo apt install -y build-essential pkg-config libglib2.0-dev
+
 ./scripts/install-user.sh
 ```
 

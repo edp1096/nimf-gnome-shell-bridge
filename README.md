@@ -1,6 +1,6 @@
 # Nimf GNOME Shell bridge
 
-A bridge adpater for Nimf and GNOME Shell 42 Wayland.
+A bridge adpater for Nimf and GNOME Shell 42 or 46 Wayland.
 
 ## Prequisite
 * https://nimfsoft.art/nimf
@@ -15,4 +15,3 @@ A bridge adpater for Nimf and GNOME Shell 42 Wayland.
 ```sh
 ./scripts/uninstall-user.sh
 ```
-

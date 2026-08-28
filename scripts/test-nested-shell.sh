@@ -1,18 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ ${NIMF_NESTED_PRIVATE_BUS:-0} != 1 ]]; then
+  exec env NIMF_NESTED_PRIVATE_BUS=1 dbus-run-session -- "$0" "$@"
+fi
+
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 test_root=$(mktemp -d /tmp/nimf-shell-nested.XXXXXX)
 test_data="$test_root/data"
 test_config="$test_root/config"
 extension_uuid='nimf-tiv3@dock-memo.local'
 test_wayland_display="nimf-test-$$"
+shell_version=$(gnome-shell --version)
+
+case "$shell_version" in
+  'GNOME Shell 42.'*)
+    extension_source="$project_dir/extension/extension.js"
+    metadata_source="$project_dir/extension/metadata.json"
+    ;;
+  'GNOME Shell 46.'*)
+    extension_source="$project_dir/extension/extension-46.js"
+    metadata_source="$project_dir/extension/metadata-46.json"
+    ;;
+  *)
+    printf 'Nested test supports GNOME Shell 42 and 46 (found: %s).\n' \
+      "$shell_version" >&2
+    exit 1
+    ;;
+esac
 
 install -d -m 0700 "$test_data/gnome-shell/extensions/$extension_uuid"
 install -d -m 0700 "$test_config"
-install -m 0644 "$project_dir/extension/metadata.json" \
+install -m 0644 "$metadata_source" \
   "$test_data/gnome-shell/extensions/$extension_uuid/metadata.json"
-install -m 0644 "$project_dir/extension/extension.js" \
+install -m 0644 "$extension_source" \
   "$test_data/gnome-shell/extensions/$extension_uuid/extension.js"
 
 export XDG_DATA_HOME="$test_data"

@@ -6,13 +6,28 @@ extension_uuid='nimf-tiv3@dock-memo.local'
 extension_dir="$HOME/.local/share/gnome-shell/extensions/$extension_uuid"
 legacy_library='/usr/lib/aarch64-linux-gnu/libnimf.so.2.0.0'
 legacy_library_sha256='4accea3dd69f584346c7f940f198096ae45521b1f4dc3495b4a6cebbaf265fba'
+shell_version=$(gnome-shell --version)
 
-if [[ $(gnome-shell --version) != 'GNOME Shell 42.9' ]]; then
-  printf 'Refusing to install: this adapter was verified only on GNOME Shell 42.9.\n' >&2
-  exit 1
-fi
+case "$shell_version" in
+  'GNOME Shell 42.'*)
+    extension_source="$project_dir/extension/extension.js"
+    metadata_source="$project_dir/extension/metadata.json"
+    adapter_name='legacy-42'
+    ;;
+  'GNOME Shell 46.'*)
+    extension_source="$project_dir/extension/extension-46.js"
+    metadata_source="$project_dir/extension/metadata-46.json"
+    adapter_name='modern-46'
+    ;;
+  *)
+    printf 'Refusing to install: supported GNOME Shell versions are 42 and 46 (found: %s).\n' \
+      "$shell_version" >&2
+    exit 1
+    ;;
+esac
 
-if [[ $(sha256sum "$legacy_library" | cut -d' ' -f1) != \
+if [[ ! -f "$legacy_library" ]] || \
+   [[ $(sha256sum "$legacy_library" | cut -d' ' -f1) != \
       "$legacy_library_sha256" ]]; then
   printf 'Refusing to install: the installed legacy Nimf ABI has changed.\n' >&2
   exit 1
@@ -29,9 +44,9 @@ install -m 0644 "$project_dir/systemd/nimf-shell-bridge.service" \
   "$HOME/.config/systemd/user/nimf-shell-bridge.service"
 
 install -d "$extension_dir"
-install -m 0644 "$project_dir/extension/metadata.json" \
+install -m 0644 "$metadata_source" \
   "$extension_dir/metadata.json"
-install -m 0644 "$project_dir/extension/extension.js" \
+install -m 0644 "$extension_source" \
   "$extension_dir/extension.js"
 
 install -d "$HOME/.local/bin"
@@ -100,7 +115,7 @@ PY
 fi
 
 printf '%s\n' \
-  'Nimf text-input-v3 bridge installed and enabled.' \
+  "Nimf text-input-v3 bridge installed ($adapter_name)." \
   "$activation_message" \
   'Emergency rollback:' \
   '  ~/.local/bin/disable-nimf-tiv3-and-restore-chrome-x11'

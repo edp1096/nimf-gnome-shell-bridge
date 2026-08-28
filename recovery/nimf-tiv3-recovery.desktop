@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=RECOVERY - Disable Nimf TIV3 / Chrome X11
+Comment=Disable the Nimf text-input-v3 bridge and restore ArcMenu Chrome to X11
+Exec=/home/swshin/.local/bin/disable-nimf-tiv3-and-restore-chrome-x11
+Icon=dialog-warning
+Terminal=true
+Categories=System;
+StartupNotify=true

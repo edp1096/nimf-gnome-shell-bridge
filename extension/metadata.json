@@ -1,0 +1,7 @@
+{
+  "uuid": "nimf-tiv3@dock-memo.local",
+  "name": "Nimf text-input-v3 bridge",
+  "description": "Connects GNOME Shell text-input-v3 clients to the installed Nimf input method",
+  "version": 1,
+  "shell-version": ["42"]
+}

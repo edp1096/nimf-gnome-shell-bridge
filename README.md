@@ -16,5 +16,3 @@ A bridge adpater for Nimf(`nimf_2022.03.05-bullseye_arm64.deb`) and GNOME Shell 
 ./scripts/uninstall-user.sh
 ```
 
-## Rollback
-* `~/.local/bin/disable-nimf-tiv3-and-restore-chrome-x11`

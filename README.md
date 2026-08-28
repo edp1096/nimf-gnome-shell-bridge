@@ -1,6 +1,6 @@
 # Nimf GNOME Shell bridge
 
-A bridge adpater for Nimf(`nimf_2022.03.05-bullseye_arm64.deb`) and GNOME Shell 42 Wayland.
+A bridge adpater for Nimf and GNOME Shell 42 Wayland.
 
 ## Prequisite
 * https://nimfsoft.art/nimf

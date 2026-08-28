@@ -15,3 +15,6 @@ A bridge adpater for Nimf and GNOME Shell 42 or 46 Wayland.
 ```sh
 ./scripts/uninstall-user.sh
 ```
+
+## License
+LGPL-3.0-or-later

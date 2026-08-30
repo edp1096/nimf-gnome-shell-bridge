@@ -10,18 +10,26 @@
     label { min-width: 0; }
     input { display: block; box-sizing: border-box; width: 100%; height: 420px;
       margin-top: 16px; padding: 16px; font-size: 36px; }
+    #rich { position: fixed; top: 10px; left: 18px; right: 18px; height: 64px;
+      box-sizing: border-box; padding: 10px; background: white; }
   </style>
 </head>
 <body>
+  <div id="rich" contenteditable="true"></div>
   <label>HTML<input id="html" autofocus></label>
   <label>CSS<input id="css"></label>
   <label>JS<input id="js"></label>
   <script>
     const fields = [...document.querySelectorAll('input')];
+    const rich = document.querySelector('#rich');
     function report(event) {
       document.title = `NIMF-E2E|${fields.map(field => field.value).join('|')}|` +
-        `${document.activeElement.id}|${event?.type ?? 'ready'}`;
+        `${document.activeElement.id}|${event?.type ?? 'ready'}|` +
+        `rich:${rich.textContent}`;
     }
+    for (const event of ['input', 'focus', 'blur', 'compositionstart',
+      'compositionupdate', 'compositionend'])
+      rich.addEventListener(event, report);
     for (const element of fields) {
       for (const event of ['input', 'focus', 'blur', 'compositionstart',
         'compositionupdate', 'compositionend'])

@@ -183,6 +183,24 @@ type_dtd() {
   sleep 0.25
 }
 
+test_repeated_contenteditable() {
+  click_window 'NIMF-E2E' 360 50
+  for _sentence in 1 2; do
+    for rich_key in 100 107 115 115 117 100 32 103 107 116 112 100 121 46; do
+      keyval "$rich_key"
+    done
+  done
+  sleep 0.25
+  chrome_rich_text=$(window_list)
+  printf 'Chrome repeated contenteditable Hangul + ASCII ordering: %s\n' \
+    "$chrome_rich_text"
+  if [[ $chrome_rich_text != *'|rich:안녕 하세요.안녕 하세요.'* ]]; then
+    printf 'Chrome contenteditable ordering test failed. Logs: %s\n' \
+      "$test_root" >&2
+    return 1
+  fi
+}
+
 establish_chrome_korean_preedit() {
   local attempt
   local probe
@@ -332,6 +350,11 @@ if ! chrome_mode_probe=$(establish_chrome_korean_preedit); then
   printf 'Could not establish Korean preedit in Chrome: %s\n' \
     "$chrome_mode_probe" >&2
   exit 1
+fi
+if [[ ${NIMF_E2E_ASCII_ONLY:-0} == 1 ]]; then
+  test_repeated_contenteditable
+  printf 'E2E logs: %s\n' "$test_root"
+  exit 0
 fi
 
 clear_focused_text
@@ -510,6 +533,8 @@ for pass in 1 2 3; do
     type_dtd
   fi
 done
+
+test_repeated_contenteditable
 
 pkill -TERM -f -- "--user-data-dir=$test_root/chrome-data" \
   2>/dev/null || true

@@ -27,6 +27,7 @@ typedef struct
   gchar *key_event_preedit_text;
   gint surrounding_cursor;
   guint key_event_preedit_cursor;
+  guint filtering_keyval;
   gboolean focused;
   gboolean preedit_visible;
   gboolean transition_in_progress;
@@ -207,6 +208,23 @@ deferred_commit_timeout_cb (gpointer user_data)
 }
 
 static void
+queue_deferred_commit (Bridge *bridge, const gchar *text)
+{
+  gchar *combined = g_strconcat (bridge->deferred_commit ?: "",
+                                 text ?: "",
+                                 NULL);
+
+  g_free (bridge->deferred_commit);
+  bridge->deferred_commit = combined;
+  if (bridge->deferred_commit_timeout_id)
+    g_source_remove (bridge->deferred_commit_timeout_id);
+  bridge->deferred_commit_timeout_id =
+    g_timeout_add (COMMIT_SETTLE_TIMEOUT_MS,
+                   deferred_commit_timeout_cb,
+                   bridge);
+}
+
+static void
 emit_preedit (Bridge *bridge, gboolean visible)
 {
   gchar *text = NULL;
@@ -295,6 +313,21 @@ on_commit (NimfIM *im, const gchar *text, Bridge *bridge)
 
   if (bridge->filtering_key_event)
     {
+      if (g_getenv ("NIMF_E2E_DEFER_KEY_COMMIT") &&
+          (bridge->filtering_keyval == 0x20 ||
+           (bridge->filtering_keyval >= 0x21 &&
+            bridge->filtering_keyval <= 0x2f) ||
+           (bridge->filtering_keyval >= 0x3a &&
+            bridge->filtering_keyval <= 0x40) ||
+           (bridge->filtering_keyval >= 0x5b &&
+            bridge->filtering_keyval <= 0x60) ||
+           (bridge->filtering_keyval >= 0x7b &&
+            bridge->filtering_keyval <= 0x7e)))
+        {
+          queue_deferred_commit (bridge, text);
+          return;
+        }
+
       /* A commit produced synchronously by a key is ordinary input. */
       emit_commit (bridge, text);
       return;
@@ -306,22 +339,9 @@ on_commit (NimfIM *im, const gchar *text, Bridge *bridge)
    * put that text in the old client, so wait for the ordering event instead
    * of forwarding this possible duplicate to whichever client is focused
    * next. Candidate-click and other genuine out-of-key commits are released
-   * by a following preedit or by the short fallback timer.
+   * by the next key or preedit, or by the short fallback timer.
    */
-  {
-    gchar *combined = g_strconcat (bridge->deferred_commit ?: "",
-                                   text ?: "",
-                                   NULL);
-
-    g_free (bridge->deferred_commit);
-    bridge->deferred_commit = combined;
-  }
-  if (bridge->deferred_commit_timeout_id)
-    g_source_remove (bridge->deferred_commit_timeout_id);
-  bridge->deferred_commit_timeout_id =
-    g_timeout_add (COMMIT_SETTLE_TIMEOUT_MS,
-                   deferred_commit_timeout_cb,
-                   bridge);
+  queue_deferred_commit (bridge, text);
 }
 
 static gboolean
@@ -441,9 +461,11 @@ filter_key_event (Bridge *bridge, GVariant *parameters)
   event.state = state & NIMF_MODIFIER_MASK;
   event.keyval = keyval;
   event.hardware_keycode = keycode;
+  bridge->filtering_keyval = keyval;
   bridge->filtering_key_event = TRUE;
   handled = nimf_im_filter_event (bridge->im, &event);
   bridge->filtering_key_event = FALSE;
+  bridge->filtering_keyval = 0;
 
   return handled;
 }
@@ -594,7 +616,16 @@ handle_method_call (GDBusConnection *connection,
 
       clear_key_event_result (bridge);
       bridge->ordered_key_event = TRUE;
+      /*
+       * A deferred commit followed by another key belongs to the current
+       * text focus.  Return it with that key so an unhandled ASCII key can be
+       * committed atomically after the preedit.  FocusOut/Reset discards a
+       * pointer-transition duplicate before another key reaches this path.
+       */
+      flush_deferred_commit (bridge, TRUE);
       handled = filter_key_event (bridge, parameters);
+      /* Test hook and any re-entrant callback use the same ordered result. */
+      flush_deferred_commit (bridge, TRUE);
       bridge->ordered_key_event = FALSE;
       g_dbus_method_invocation_return_value (
         invocation,

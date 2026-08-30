@@ -20,6 +20,7 @@ const NimfInputMethod = GObject.registerClass({
 
         this._currentFocus = null;
         this._preeditVisible = false;
+        this._preeditText = '';
         this._enabled = true;
         this._deferPreedit = false;
         this._pendingPreedit = null;
@@ -27,6 +28,7 @@ const NimfInputMethod = GObject.registerClass({
         this._backspaceRepeatId = 0;
         this._backspaceToken = 0;
         this._backspaceKey = null;
+        this._committedPrintableKeys = new Set();
         this._keyboardSettings = new Gio.Settings({
             schema_id: 'org.gnome.desktop.peripherals.keyboard',
         });
@@ -142,6 +144,8 @@ const NimfInputMethod = GObject.registerClass({
         this._pendingPreedit = null;
         this._deferPreedit = false;
         this._preeditVisible = false;
+        this._preeditText = '';
+        this._committedPrintableKeys.clear();
         this._cancelBackspaceRepeat();
     }
 
@@ -151,12 +155,14 @@ const NimfInputMethod = GObject.registerClass({
         this._preeditDelayId = 0;
         this._pendingPreedit = null;
         this._deferPreedit = false;
+        this._committedPrintableKeys.clear();
         this._cancelBackspaceRepeat();
         if (this._preeditVisible && this._currentFocus) {
             this.set_preedit_text(
                 null, 0, 0, Clutter.PreeditResetMode.CLEAR);
         }
         this._preeditVisible = false;
+        this._preeditText = '';
     }
 
     _queueDeferredPreedit(text, cursor) {
@@ -171,6 +177,7 @@ const NimfInputMethod = GObject.registerClass({
                 this._pendingPreedit = null;
                 if (pending && this._enabled && this._currentFocus) {
                     this._preeditVisible = true;
+                    this._preeditText = pending.text;
                     this.set_preedit_text(
                         pending.text,
                         pending.cursor,
@@ -195,6 +202,7 @@ const NimfInputMethod = GObject.registerClass({
                 null, 0, 0, Clutter.PreeditResetMode.CLEAR);
         }
         this._preeditVisible = false;
+        this._preeditText = '';
         this.commit(text);
     }
 
@@ -209,6 +217,7 @@ const NimfInputMethod = GObject.registerClass({
         }
         const preeditVisible = visible && text.length > 0;
         this._preeditVisible = preeditVisible;
+        this._preeditText = preeditVisible ? text : '';
         this.set_preedit_text(
             preeditVisible ? text : null,
             cursor,
@@ -401,6 +410,9 @@ const NimfInputMethod = GObject.registerClass({
             press && this._backspaceKey !== null;
         const consumedBackspaceRelease = keySymbol === BACKSPACE_KEYVAL &&
             !press && this._backspaceKey !== null;
+        const keycode = event.get_key_code() >>> 0;
+        const consumedPrintableRelease = !press &&
+            this._committedPrintableKeys.delete(keycode);
         if (continuingBackspace)
             this._stopBackspaceTimer();
         else if (consumedBackspaceRelease)
@@ -409,7 +421,7 @@ const NimfInputMethod = GObject.registerClass({
             this._cancelBackspaceRepeat();
         const parameters = new GLib.Variant('(uuuub)', [
             keySymbol,
-            event.get_key_code() >>> 0,
+            keycode,
             state,
             0,
             press,
@@ -434,14 +446,33 @@ const NimfInputMethod = GObject.registerClass({
                         preeditCursor,
                         preeditVisible,
                     ] = proxy.call_finish(result).deep_unpack();
-                    if (committedText.length > 0)
-                        this._applyCommit(committedText);
+                    const plainPrintable = !handled && press &&
+                        committedText.length > 0 &&
+                        keySymbol >= 0x20 && keySymbol <= 0x7e &&
+                        !(state & (Clutter.ModifierType.CONTROL_MASK |
+                            Clutter.ModifierType.MOD1_MASK |
+                            Clutter.ModifierType.SUPER_MASK));
+                    if (plainPrintable)
+                        this._committedPrintableKeys.add(keycode);
+                    if (committedText.length > 0) {
+                        const latestPreedit = this._pendingPreedit?.text ??
+                            this._preeditText;
+                        const textToCommit = plainPrintable &&
+                            latestPreedit.length > 0
+                            ? latestPreedit
+                            : committedText;
+                        this._applyCommit(textToCommit +
+                            (plainPrintable
+                                ? String.fromCodePoint(keySymbol)
+                                : ''));
+                    }
                     if (preeditChanged) {
                         this._applyPreedit(
                             preeditText, preeditCursor, preeditVisible);
                     }
                     let eventHandled = handled || consumedBackspaceRelease ||
-                        continuingBackspace;
+                        continuingBackspace || consumedPrintableRelease ||
+                        plainPrintable;
                     if (keySymbol === BACKSPACE_KEYVAL && press && handled &&
                         !continuingBackspace)
                         this._startBackspaceRepeat(event);
@@ -486,6 +517,7 @@ const NimfInputMethod = GObject.registerClass({
         this._cancellable.cancel();
         this._clearPreedit();
         this._currentFocus = null;
+        this._committedPrintableKeys.clear();
         this.disconnect(this._preeditNotifyId);
         this._proxy.disconnect(this._signalId);
         this._proxy.disconnect(this._ownerId);

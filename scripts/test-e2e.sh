@@ -84,6 +84,9 @@ export GSETTINGS_BACKEND=keyfile
 gsettings set org.gnome.shell disable-user-extensions false
 gsettings set org.gnome.shell enabled-extensions \
   "['$bridge_uuid', '$driver_uuid']"
+gsettings set org.gnome.desktop.peripherals.keyboard repeat true
+gsettings set org.gnome.desktop.peripherals.keyboard delay 300
+gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 
 env LD_PRELOAD="$runtime_override" \
   NIMF_TEST_RUNTIME_DIR="$test_nimf_runtime" \
@@ -160,6 +163,10 @@ wait_for_window() {
 keyval() {
   driver_call Keyval "$1" >/dev/null
   sleep 0.04
+}
+
+keyval_nowait() {
+  driver_call Keyval "$1" >/dev/null
 }
 
 clear_focused_text() {
@@ -326,6 +333,122 @@ if ! chrome_mode_probe=$(establish_chrome_korean_preedit); then
     "$chrome_mode_probe" >&2
   exit 1
 fi
+
+clear_focused_text
+keyval_nowait 97
+keyval_nowait 97
+keyval_nowait 97
+sleep 0.25
+driver_call KeyState 65288 true >/dev/null
+sleep 0.1
+driver_call KeyState 65288 false >/dev/null
+sleep 0.25
+chrome_backspace_tap=$(window_list)
+printf 'Chrome Backspace tap on preedit: %s\n' "$chrome_backspace_tap"
+if [[ $chrome_backspace_tap != *'NIMF-E2E|ㅁㅁ|||html|'* ]]; then
+  printf 'Chrome Backspace tap test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+
+clear_focused_text
+keyval_nowait 97
+keyval_nowait 97
+keyval_nowait 97
+sleep 0.25
+driver_call KeyState 65288 true >/dev/null
+sleep 1.2
+driver_call KeyState 65288 false >/dev/null
+sleep 0.25
+chrome_backspace_repeat=$(window_list)
+printf 'Chrome Backspace repeat after preedit deletion: %s\n' \
+  "$chrome_backspace_repeat"
+if [[ $chrome_backspace_repeat != *'NIMF-E2E||||html|'* ]]; then
+  printf 'Chrome Backspace repeat test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+
+for _repeat_key in 1 2 3 4; do
+  keyval_nowait 97
+done
+sleep 0.25
+chrome_repeated_consonant=$(window_list)
+printf 'Chrome rapid repeated consonant: %s\n' \
+  "$chrome_repeated_consonant"
+if [[ $chrome_repeated_consonant != *'NIMF-E2E|ㅁㅁㅁㅁ|||html|'* ]]; then
+  printf 'Chrome rapid repeated consonant test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+clear_focused_text
+
+for punctuation_key in 97 106 100 105; do
+  keyval_nowait "$punctuation_key"
+done
+driver_call KeyState 65505 true >/dev/null
+keyval_nowait 33
+driver_call KeyState 65505 false >/dev/null
+for punctuation_key in 100 108 114 106 115; do
+  keyval_nowait "$punctuation_key"
+done
+driver_call KeyState 65505 true >/dev/null
+keyval_nowait 63
+driver_call KeyState 65505 false >/dev/null
+sleep 0.25
+chrome_punctuation_commit=$(window_list)
+printf 'Chrome Hangul + punctuation ordering: %s\n' \
+  "$chrome_punctuation_commit"
+if [[ $chrome_punctuation_commit != *'NIMF-E2E|머야!이건?|||html|'* ]]; then
+  printf 'Chrome punctuation commit ordering test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+clear_focused_text
+
+for space_key in 97 110 106 100 105 32 100 108 114 106 115; do
+  keyval_nowait "$space_key"
+done
+sleep 0.25
+chrome_hangul_space=$(window_list)
+printf 'Chrome Hangul + Space ordering: %s\n' "$chrome_hangul_space"
+if [[ $chrome_hangul_space != *'NIMF-E2E|뭐야 이건|||html|'* ]]; then
+  printf 'Chrome Hangul/Space ordering test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+keyval_nowait 32
+sleep 0.25
+clear_focused_text
+
+keyval_nowait 122
+keyval_nowait 122
+keyval_nowait 122
+keyval_nowait 122
+keyval_nowait 32
+sleep 0.25
+chrome_space_commit=$(window_list)
+printf 'Chrome consonant preedit + Space: %s\n' "$chrome_space_commit"
+if [[ $chrome_space_commit != *'NIMF-E2E|ㅋㅋㅋㅋ |||html|'* ]]; then
+  printf 'Chrome Space commit ordering test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+
+keyval_nowait 100
+sleep 0.25
+chrome_space_next_preedit=$(window_list)
+printf 'Chrome consonant preedit + Space + next preedit: %s\n' \
+  "$chrome_space_next_preedit"
+if [[ $chrome_space_next_preedit != *'NIMF-E2E|ㅋㅋㅋㅋ ㅇ|||html|'* ]]; then
+  printf 'Chrome Space/next-preedit ordering test failed. Logs: %s\n' \
+    "$test_root" >&2
+  exit 1
+fi
+keyval_nowait 32
+sleep 0.25
+clear_focused_text
+type_dtd
 
 for pass in 1 2 3; do
   focus_field css 365

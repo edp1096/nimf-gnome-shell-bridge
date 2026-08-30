@@ -10,6 +10,7 @@ const OBJECT_PATH = '/org/nimf/ShellBridge';
 const INTERFACE_NAME = 'org.nimf.ShellBridge1';
 const KEY_TIMEOUT_MS = 5000;
 const CALL_TIMEOUT_MS = 2000;
+const BACKSPACE_KEYVAL = 65288;
 
 const NimfInputMethod = GObject.registerClass({
     GTypeName: 'NimfTiv3InputMethod46V1',
@@ -23,6 +24,12 @@ const NimfInputMethod = GObject.registerClass({
         this._deferPreedit = false;
         this._pendingPreedit = null;
         this._preeditDelayId = 0;
+        this._backspaceRepeatId = 0;
+        this._backspaceToken = 0;
+        this._backspaceKey = null;
+        this._keyboardSettings = new Gio.Settings({
+            schema_id: 'org.gnome.desktop.peripherals.keyboard',
+        });
         this._cancellable = new Gio.Cancellable();
         this._proxy = Gio.DBusProxy.new_for_bus_sync(
             Gio.BusType.SESSION,
@@ -135,6 +142,7 @@ const NimfInputMethod = GObject.registerClass({
         this._pendingPreedit = null;
         this._deferPreedit = false;
         this._preeditVisible = false;
+        this._cancelBackspaceRepeat();
     }
 
     _clearPreedit() {
@@ -143,6 +151,7 @@ const NimfInputMethod = GObject.registerClass({
         this._preeditDelayId = 0;
         this._pendingPreedit = null;
         this._deferPreedit = false;
+        this._cancelBackspaceRepeat();
         if (this._preeditVisible && this._currentFocus) {
             this.set_preedit_text(
                 null, 0, 0, Clutter.PreeditResetMode.CLEAR);
@@ -172,39 +181,147 @@ const NimfInputMethod = GObject.registerClass({
             });
     }
 
+    _applyCommit(text) {
+        if (!this._currentFocus)
+            return;
+
+        if (this._preeditDelayId)
+            GLib.source_remove(this._preeditDelayId);
+        this._preeditDelayId = 0;
+        this._pendingPreedit = null;
+        this._deferPreedit = true;
+        if (this._preeditVisible) {
+            this.set_preedit_text(
+                null, 0, 0, Clutter.PreeditResetMode.CLEAR);
+        }
+        this._preeditVisible = false;
+        this.commit(text);
+    }
+
+    _applyPreedit(text, cursor, visible) {
+        if (!this._currentFocus)
+            return;
+
+        if (visible && text.length > 0 &&
+            (this._deferPreedit || this._pendingPreedit)) {
+            this._queueDeferredPreedit(text, cursor);
+            return;
+        }
+        const preeditVisible = visible && text.length > 0;
+        this._preeditVisible = preeditVisible;
+        this.set_preedit_text(
+            preeditVisible ? text : null,
+            cursor,
+            cursor,
+            preeditVisible
+                ? Clutter.PreeditResetMode.COMMIT
+                : Clutter.PreeditResetMode.CLEAR);
+    }
+
+    _stopBackspaceTimer() {
+        if (this._backspaceRepeatId)
+            GLib.source_remove(this._backspaceRepeatId);
+        this._backspaceRepeatId = 0;
+    }
+
+    _cancelBackspaceRepeat() {
+        this._stopBackspaceTimer();
+        this._backspaceToken++;
+        this._backspaceKey = null;
+    }
+
+    _scheduleBackspaceRepeat(delay, token) {
+        this._stopBackspaceTimer();
+        this._backspaceRepeatId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT, Math.max(1, delay), () => {
+                this._backspaceRepeatId = 0;
+                this._repeatBackspace(token);
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    _startBackspaceRepeat(event) {
+        this._cancelBackspaceRepeat();
+        this._backspaceKey = {
+            keycode: event.get_key_code() >>> 0,
+            state: (event.get_state() &
+                Clutter.ModifierType.MODIFIER_MASK) >>> 0,
+        };
+        if (!this._keyboardSettings.get_boolean('repeat'))
+            return;
+
+        const token = this._backspaceToken;
+        this._scheduleBackspaceRepeat(
+            this._keyboardSettings.get_uint('delay'), token);
+    }
+
+    _repeatBackspace(token) {
+        const key = this._backspaceKey;
+        if (!this._enabled || !this._available || !this._currentFocus ||
+            !key || token !== this._backspaceToken)
+            return;
+
+        const parameters = new GLib.Variant('(uuuub)', [
+            BACKSPACE_KEYVAL, key.keycode, key.state, 0, true,
+        ]);
+        this._proxy.call(
+            'FilterKeyEventOrdered',
+            parameters,
+            Gio.DBusCallFlags.NONE,
+            KEY_TIMEOUT_MS,
+            this._cancellable,
+            (proxy, result) => {
+                if (!this._enabled || !this._backspaceKey ||
+                    token !== this._backspaceToken)
+                    return;
+
+                try {
+                    const [
+                        handled,
+                        committedText,
+                        preeditChanged,
+                        preeditText,
+                        preeditCursor,
+                        preeditVisible,
+                    ] = proxy.call_finish(result).deep_unpack();
+                    if (committedText.length > 0)
+                        this._applyCommit(committedText);
+                    if (preeditChanged) {
+                        this._applyPreedit(
+                            preeditText, preeditCursor, preeditVisible);
+                    }
+                    if (!handled) {
+                        const time = Math.floor(
+                            GLib.get_monotonic_time() / 1000) >>> 0;
+                        this.forward_key(
+                            BACKSPACE_KEYVAL, key.keycode, key.state, time, true);
+                        this.forward_key(
+                            BACKSPACE_KEYVAL, key.keycode, key.state, time, false);
+                    }
+                    this._scheduleBackspaceRepeat(
+                        this._keyboardSettings.get_uint('repeat-interval'),
+                        token);
+                } catch (error) {
+                    if (!error.matches(
+                        Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+                        console.error(
+                            `Nimf Backspace repeat failed: ${error.message}`);
+                    }
+                    this._cancelBackspaceRepeat();
+                }
+            });
+    }
+
     _onBridgeSignal(_proxy, _sender, signalName, parameters) {
         if (!this._enabled)
             return;
 
         if (signalName === 'Commit') {
-            if (!this._currentFocus)
-                return;
             const [text] = parameters.deep_unpack();
-            if (this._preeditDelayId)
-                GLib.source_remove(this._preeditDelayId);
-            this._preeditDelayId = 0;
-            this._pendingPreedit = null;
-            this._deferPreedit = true;
-            this._preeditVisible = false;
-            this.commit(text);
+            this._applyCommit(text);
         } else if (signalName === 'Preedit') {
-            if (!this._currentFocus)
-                return;
             const [text, cursor, visible] = parameters.deep_unpack();
-            if (visible && text.length > 0 &&
-                (this._deferPreedit || this._pendingPreedit)) {
-                this._queueDeferredPreedit(text, cursor);
-                return;
-            }
-            const preeditVisible = visible && text.length > 0;
-            this._preeditVisible = preeditVisible;
-            this.set_preedit_text(
-                preeditVisible ? text : null,
-                cursor,
-                cursor,
-                preeditVisible
-                    ? Clutter.PreeditResetMode.COMMIT
-                    : Clutter.PreeditResetMode.CLEAR);
+            this._applyPreedit(text, cursor, visible);
         } else if (signalName === 'DeleteSurrounding') {
             if (!this._currentFocus)
                 return;
@@ -280,6 +397,16 @@ const NimfInputMethod = GObject.registerClass({
         const state = (event.get_state() &
             Clutter.ModifierType.MODIFIER_MASK) >>> 0;
         const press = event.type() !== Clutter.EventType.KEY_RELEASE;
+        const continuingBackspace = keySymbol === BACKSPACE_KEYVAL &&
+            press && this._backspaceKey !== null;
+        const consumedBackspaceRelease = keySymbol === BACKSPACE_KEYVAL &&
+            !press && this._backspaceKey !== null;
+        if (continuingBackspace)
+            this._stopBackspaceTimer();
+        else if (consumedBackspaceRelease)
+            this._cancelBackspaceRepeat();
+        else if (press && keySymbol !== BACKSPACE_KEYVAL)
+            this._cancelBackspaceRepeat();
         const parameters = new GLib.Variant('(uuuub)', [
             keySymbol,
             event.get_key_code() >>> 0,
@@ -289,7 +416,7 @@ const NimfInputMethod = GObject.registerClass({
         ]);
 
         this._proxy.call(
-            'FilterKeyEvent',
+            'FilterKeyEventOrdered',
             parameters,
             Gio.DBusCallFlags.NONE,
             KEY_TIMEOUT_MS,
@@ -299,16 +426,35 @@ const NimfInputMethod = GObject.registerClass({
                     return;
 
                 try {
-                    const [handled] = proxy.call_finish(result).deep_unpack();
-                    if (!handled) {
-                        this.forward_key(
-                            keySymbol,
-                            event.get_key_code() >>> 0,
-                            state,
-                            event.get_time(),
-                            press);
+                    const [
+                        handled,
+                        committedText,
+                        preeditChanged,
+                        preeditText,
+                        preeditCursor,
+                        preeditVisible,
+                    ] = proxy.call_finish(result).deep_unpack();
+                    if (committedText.length > 0)
+                        this._applyCommit(committedText);
+                    if (preeditChanged) {
+                        this._applyPreedit(
+                            preeditText, preeditCursor, preeditVisible);
                     }
-                    this.notify_key_event(event, true);
+                    let eventHandled = handled || consumedBackspaceRelease ||
+                        continuingBackspace;
+                    if (keySymbol === BACKSPACE_KEYVAL && press && handled &&
+                        !continuingBackspace)
+                        this._startBackspaceRepeat(event);
+                    else if (continuingBackspace && !handled) {
+                        const time = event.get_time();
+                        this.forward_key(
+                            keySymbol, event.get_key_code() >>> 0,
+                            state, time, true);
+                        this.forward_key(
+                            keySymbol, event.get_key_code() >>> 0,
+                            state, time, false);
+                    }
+                    this.notify_key_event(event, eventHandled);
                 } catch (error) {
                     if (!error.matches(
                         Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {

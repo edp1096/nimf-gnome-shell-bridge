@@ -23,11 +23,17 @@ typedef struct
   gchar *surrounding_text;
   gchar *transition_commit;
   gchar *deferred_commit;
+  gchar *key_event_commit;
+  gchar *key_event_preedit_text;
   gint surrounding_cursor;
+  guint key_event_preedit_cursor;
   gboolean focused;
   gboolean preedit_visible;
   gboolean transition_in_progress;
   gboolean filtering_key_event;
+  gboolean ordered_key_event;
+  gboolean key_event_preedit_changed;
+  gboolean key_event_preedit_visible;
   gboolean deferred_preedit;
   guint deferred_commit_timeout_id;
   guint focus_generation;
@@ -71,6 +77,19 @@ static const gchar introspection_xml[] =
   "   <arg name='focus_generation' type='u' direction='in'/>"
   "   <arg name='press' type='b' direction='in'/>"
   "   <arg name='handled' type='b' direction='out'/>"
+  "  </method>"
+  "  <method name='FilterKeyEventOrdered'>"
+  "   <arg name='keyval' type='u' direction='in'/>"
+  "   <arg name='hardware_keycode' type='u' direction='in'/>"
+  "   <arg name='state' type='u' direction='in'/>"
+  "   <arg name='focus_generation' type='u' direction='in'/>"
+  "   <arg name='press' type='b' direction='in'/>"
+  "   <arg name='handled' type='b' direction='out'/>"
+  "   <arg name='committed_text' type='s' direction='out'/>"
+  "   <arg name='preedit_changed' type='b' direction='out'/>"
+  "   <arg name='preedit_text' type='s' direction='out'/>"
+  "   <arg name='preedit_cursor' type='u' direction='out'/>"
+  "   <arg name='preedit_visible' type='b' direction='out'/>"
   "  </method>"
   "  <signal name='Commit'>"
   "   <arg name='text' type='s'/>"
@@ -122,8 +141,25 @@ emit_signal (Bridge *bridge, const gchar *name, GVariant *parameters)
 static void emit_preedit (Bridge *bridge, gboolean visible);
 
 static void
+append_key_event_commit (Bridge *bridge, const gchar *text)
+{
+  gchar *combined = g_strconcat (bridge->key_event_commit ?: "",
+                                 text ?: "",
+                                 NULL);
+
+  g_free (bridge->key_event_commit);
+  bridge->key_event_commit = combined;
+}
+
+static void
 emit_commit (Bridge *bridge, const gchar *text)
 {
+  if (bridge->ordered_key_event)
+    {
+      append_key_event_commit (bridge, text);
+      return;
+    }
+
   emit_signal (bridge,
                "Commit",
                g_variant_new ("(su)",
@@ -195,6 +231,17 @@ emit_preedit (Bridge *bridge, gboolean visible)
         }
 
       flush_deferred_commit (bridge, FALSE);
+    }
+
+  if (bridge->ordered_key_event)
+    {
+      g_free (bridge->key_event_preedit_text);
+      bridge->key_event_preedit_text = g_strdup (text);
+      bridge->key_event_preedit_cursor = (guint) MAX (cursor, 0);
+      bridge->key_event_preedit_visible = visible;
+      bridge->key_event_preedit_changed = TRUE;
+      free (text);
+      return;
     }
 
   emit_signal (bridge,
@@ -361,6 +408,47 @@ return_transition_commit (Bridge *bridge,
 }
 
 static void
+clear_key_event_result (Bridge *bridge)
+{
+  g_clear_pointer (&bridge->key_event_commit, g_free);
+  g_clear_pointer (&bridge->key_event_preedit_text, g_free);
+  bridge->key_event_preedit_cursor = 0;
+  bridge->key_event_preedit_changed = FALSE;
+  bridge->key_event_preedit_visible = FALSE;
+}
+
+static gboolean
+filter_key_event (Bridge *bridge, GVariant *parameters)
+{
+  NimfLegacyEvent event = { 0 };
+  guint keyval;
+  guint keycode;
+  guint state;
+  guint focus_generation;
+  gboolean press;
+  gboolean handled;
+
+  g_variant_get (parameters,
+                 "(uuuub)",
+                 &keyval,
+                 &keycode,
+                 &state,
+                 &focus_generation,
+                 &press);
+  bridge->focus_generation = focus_generation;
+  event.type = press ? NIMF_LEGACY_EVENT_KEY_PRESS
+                     : NIMF_LEGACY_EVENT_KEY_RELEASE;
+  event.state = state & NIMF_MODIFIER_MASK;
+  event.keyval = keyval;
+  event.hardware_keycode = keycode;
+  bridge->filtering_key_event = TRUE;
+  handled = nimf_im_filter_event (bridge->im, &event);
+  bridge->filtering_key_event = FALSE;
+
+  return handled;
+}
+
+static void
 handle_method_call (GDBusConnection *connection,
                     const gchar *sender,
                     const gchar *object_path,
@@ -497,32 +585,27 @@ handle_method_call (GDBusConnection *connection,
     }
   else if (g_str_equal (method_name, "FilterKeyEvent"))
     {
-      NimfLegacyEvent event = { 0 };
-      guint keyval;
-      guint keycode;
-      guint state;
-      guint focus_generation;
-      gboolean press;
+      g_dbus_method_invocation_return_value (invocation,
+        g_variant_new ("(b)", filter_key_event (bridge, parameters)));
+    }
+  else if (g_str_equal (method_name, "FilterKeyEventOrdered"))
+    {
       gboolean handled;
 
-      g_variant_get (parameters,
-                     "(uuuub)",
-                     &keyval,
-                     &keycode,
-                     &state,
-                     &focus_generation,
-                     &press);
-      bridge->focus_generation = focus_generation;
-      event.type = press ? NIMF_LEGACY_EVENT_KEY_PRESS
-                         : NIMF_LEGACY_EVENT_KEY_RELEASE;
-      event.state = state & NIMF_MODIFIER_MASK;
-      event.keyval = keyval;
-      event.hardware_keycode = keycode;
-      bridge->filtering_key_event = TRUE;
-      handled = nimf_im_filter_event (bridge->im, &event);
-      bridge->filtering_key_event = FALSE;
-      g_dbus_method_invocation_return_value (invocation,
-                                             g_variant_new ("(b)", handled));
+      clear_key_event_result (bridge);
+      bridge->ordered_key_event = TRUE;
+      handled = filter_key_event (bridge, parameters);
+      bridge->ordered_key_event = FALSE;
+      g_dbus_method_invocation_return_value (
+        invocation,
+        g_variant_new ("(bsbsub)",
+                       handled,
+                       bridge->key_event_commit ?: "",
+                       bridge->key_event_preedit_changed,
+                       bridge->key_event_preedit_text ?: "",
+                       bridge->key_event_preedit_cursor,
+                       bridge->key_event_preedit_visible));
+      clear_key_event_result (bridge);
     }
   else
     {
@@ -686,6 +769,7 @@ main (int argc, char **argv)
     g_bus_unown_name (bridge.owner_id);
   g_clear_object (&bridge.connection);
   discard_deferred_commit (&bridge);
+  clear_key_event_result (&bridge);
   nimf_im_free (bridge.im);
   g_free (bridge.surrounding_text);
   g_free (bridge.transition_commit);

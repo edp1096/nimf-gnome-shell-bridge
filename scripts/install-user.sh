@@ -7,6 +7,8 @@ extension_dir="$HOME/.local/share/gnome-shell/extensions/$extension_uuid"
 legacy_library='/usr/lib/aarch64-linux-gnu/libnimf.so.2.0.0'
 legacy_library_sha256='4accea3dd69f584346c7f940f198096ae45521b1f4dc3495b4a6cebbaf265fba'
 shell_version=$(gnome-shell --version)
+extension_was_loaded=false
+extension_source_changed=true
 
 case "$shell_version" in
   'GNOME Shell 42.'*)
@@ -25,6 +27,13 @@ case "$shell_version" in
     exit 1
     ;;
 esac
+
+if gnome-extensions info "$extension_uuid" >/dev/null 2>&1; then
+  extension_was_loaded=true
+  if cmp -s "$extension_source" "$extension_dir/extension.js"; then
+    extension_source_changed=false
+  fi
+fi
 
 if [[ ! -f "$legacy_library" ]] || \
    [[ $(sha256sum "$legacy_library" | cut -d' ' -f1) != \
@@ -61,7 +70,8 @@ install -m 0644 "$project_dir/recovery/nimf-tiv3-recovery.desktop" \
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 systemctl --user daemon-reload
-systemctl --user enable --now nimf-shell-bridge.service
+systemctl --user enable nimf-shell-bridge.service
+systemctl --user restart nimf-shell-bridge.service
 
 bridge_ready=false
 for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -82,7 +92,12 @@ fi
 
 if gnome-extensions info "$extension_uuid" >/dev/null 2>&1; then
   gnome-extensions enable "$extension_uuid"
-  activation_message='The extension is enabled in the current session.'
+  if [[ $extension_was_loaded == true && \
+        $extension_source_changed == true ]]; then
+    activation_message='The updated extension will load at the next login.'
+  else
+    activation_message='The extension is enabled in the current session.'
+  fi
 else
   python3 - "$extension_uuid" <<'PY'
 import ast

@@ -1,0 +1,6 @@
+{
+  "uuid": "nimf-e2e-driver@dock-memo.local",
+  "name": "Nimf E2E input driver",
+  "description": "Virtual input driver for the isolated nested-shell test",
+  "shell-version": ["42"]
+}

@@ -5,6 +5,7 @@ After=graphical-session-pre.target
 [Service]
 Type=dbus
 BusName=org.nimf.ShellBridge
+ExecStartPre=/bin/sh -c 'n=0; while [ ! -S "$XDG_RUNTIME_DIR/nimf/socket" ] && [ "$n" -lt 100 ]; do n=$((n + 1)); sleep 0.1; done'
 ExecStart=%h/.local/libexec/nimf-shell-bridge
 Restart=on-failure
 RestartSec=2

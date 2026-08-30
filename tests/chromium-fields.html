@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>NIMF-E2E|loading</title>
+  <style>
+    body { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+      box-sizing: border-box; margin: 0; padding: 100px 18px 18px;
+      font: 28px sans-serif; background: #eee; }
+    label { min-width: 0; }
+    input { display: block; box-sizing: border-box; width: 100%; height: 420px;
+      margin-top: 16px; padding: 16px; font-size: 36px; }
+  </style>
+</head>
+<body>
+  <label>HTML<input id="html" autofocus></label>
+  <label>CSS<input id="css"></label>
+  <label>JS<input id="js"></label>
+  <script>
+    const fields = [...document.querySelectorAll('input')];
+    function report(event) {
+      document.title = `NIMF-E2E|${fields.map(field => field.value).join('|')}|` +
+        `${document.activeElement.id}|${event?.type ?? 'ready'}`;
+    }
+    for (const element of fields) {
+      for (const event of ['input', 'focus', 'blur', 'compositionstart',
+        'compositionupdate', 'compositionend'])
+        element.addEventListener(event, report);
+    }
+    fields[0].focus();
+    report();
+  </script>
+</body>
+</html>

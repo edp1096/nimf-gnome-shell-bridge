@@ -1,6 +1,14 @@
 # Nimf GNOME Shell bridge
 
-A bridge adpater for Nimf and GNOME Shell 42 or 46 Wayland.
+A bridge adapter for Nimf and GNOME Shell 42 or 46 Wayland.
+
+The bridge also works around Chromium/Electron's native Wayland
+end-of-preedit focus bug. Live preedit is registered with Mutter's `COMMIT`
+reset mode, so Mutter commits it to the original text focus before a pointer
+press reaches the client. The bridge forwards commits produced by key events
+immediately, while briefly deferring an out-of-key commit until the following
+preedit or reset event identifies whether it is genuine or Nimf's duplicate
+focus-reset commit.
 
 ## Prequisite
 * https://nimfsoft.art/nimf

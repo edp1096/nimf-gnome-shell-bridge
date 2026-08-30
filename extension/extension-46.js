@@ -45,7 +45,6 @@ const NimfInputMethod = GObject.registerClass({
         this._preeditNotifyId = this.connect('notify::can-show-preedit', () => {
             this._callVoid('SetUsePreedit', new GLib.Variant('(b)', [true]));
         });
-
         this._onBridgeOwnerChanged();
     }
 
@@ -76,7 +75,7 @@ const NimfInputMethod = GObject.registerClass({
                 try {
                     const [bridgeVersion, nimfAbi] =
                         proxy.call_finish(result).deep_unpack();
-                    if (bridgeVersion !== '1') {
+                    if (bridgeVersion !== '2') {
                         console.error(
                             `Unsupported Nimf bridge version ${bridgeVersion}`);
                         return;
@@ -87,7 +86,7 @@ const NimfInputMethod = GObject.registerClass({
                         'SetUsePreedit', new GLib.Variant('(b)', [true]));
                     if (this._currentFocus) {
                         this._callVoid('FocusIn');
-                        this.emit('request-surrounding');
+                        this._requestSurrounding();
                     }
                     console.log(
                         `Nimf text-input-v3 bridge connected (${nimfAbi})`);
@@ -122,6 +121,22 @@ const NimfInputMethod = GObject.registerClass({
             });
     }
 
+    _requestSurrounding() {
+        if (!this._currentFocus)
+            return;
+
+        this.emit('request-surrounding');
+    }
+
+    _finishTransition() {
+        if (this._preeditDelayId)
+            GLib.source_remove(this._preeditDelayId);
+        this._preeditDelayId = 0;
+        this._pendingPreedit = null;
+        this._deferPreedit = false;
+        this._preeditVisible = false;
+    }
+
     _clearPreedit() {
         if (this._preeditDelayId)
             GLib.source_remove(this._preeditDelayId);
@@ -151,7 +166,7 @@ const NimfInputMethod = GObject.registerClass({
                         pending.text,
                         pending.cursor,
                         pending.cursor,
-                        Clutter.PreeditResetMode.CLEAR);
+                        Clutter.PreeditResetMode.COMMIT);
                 }
                 return GLib.SOURCE_REMOVE;
             });
@@ -181,12 +196,15 @@ const NimfInputMethod = GObject.registerClass({
                 this._queueDeferredPreedit(text, cursor);
                 return;
             }
-            this._preeditVisible = visible && text.length > 0;
+            const preeditVisible = visible && text.length > 0;
+            this._preeditVisible = preeditVisible;
             this.set_preedit_text(
-                visible && text.length > 0 ? text : null,
+                preeditVisible ? text : null,
                 cursor,
                 cursor,
-                Clutter.PreeditResetMode.CLEAR);
+                preeditVisible
+                    ? Clutter.PreeditResetMode.COMMIT
+                    : Clutter.PreeditResetMode.CLEAR);
         } else if (signalName === 'DeleteSurrounding') {
             if (!this._currentFocus)
                 return;
@@ -202,7 +220,7 @@ const NimfInputMethod = GObject.registerClass({
             }
         } else if (signalName === 'RequestSurrounding') {
             if (this._currentFocus)
-                this.emit('request-surrounding');
+                this._requestSurrounding();
         } else if (signalName === 'Beep') {
             console.log('Nimf requested an input-method beep');
         }
@@ -211,7 +229,7 @@ const NimfInputMethod = GObject.registerClass({
     vfunc_focus_in(focus) {
         this._currentFocus = focus;
         this._callVoid('FocusIn');
-        this.emit('request-surrounding');
+        this._requestSurrounding();
     }
 
     vfunc_focus_out() {
@@ -223,9 +241,9 @@ const NimfInputMethod = GObject.registerClass({
 
     vfunc_reset() {
         this._callVoid('Reset');
-        this._clearPreedit();
+        this._finishTransition();
         if (this._currentFocus)
-            this.emit('request-surrounding');
+            this._requestSurrounding();
     }
 
     vfunc_set_cursor_location(rect) {
@@ -262,10 +280,11 @@ const NimfInputMethod = GObject.registerClass({
         const state = (event.get_state() &
             Clutter.ModifierType.MODIFIER_MASK) >>> 0;
         const press = event.type() !== Clutter.EventType.KEY_RELEASE;
-        const parameters = new GLib.Variant('(uuub)', [
+        const parameters = new GLib.Variant('(uuuub)', [
             keySymbol,
             event.get_key_code() >>> 0,
             state,
+            0,
             press,
         ]);
 

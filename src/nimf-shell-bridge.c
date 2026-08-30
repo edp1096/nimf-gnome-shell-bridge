@@ -9,6 +9,8 @@
 #define OBJECT_PATH "/org/nimf/ShellBridge"
 #define INTERFACE_NAME "org.nimf.ShellBridge1"
 #define NIMF_MODIFIER_MASK 0x5c001fffU
+/* Fallback only: Reset/FocusOut normally resolves a deferred commit first. */
+#define COMMIT_SETTLE_TIMEOUT_MS 20
 
 typedef struct
 {
@@ -19,9 +21,16 @@ typedef struct
   guint owner_id;
   NimfIM *im;
   gchar *surrounding_text;
+  gchar *transition_commit;
+  gchar *deferred_commit;
   gint surrounding_cursor;
   gboolean focused;
   gboolean preedit_visible;
+  gboolean transition_in_progress;
+  gboolean filtering_key_event;
+  gboolean deferred_preedit;
+  guint deferred_commit_timeout_id;
+  guint focus_generation;
   gint exit_status;
 } Bridge;
 
@@ -34,7 +43,13 @@ static const gchar introspection_xml[] =
   "  </method>"
   "  <method name='FocusIn'/>"
   "  <method name='FocusOut'/>"
+  "  <method name='FocusOutSync'>"
+  "   <arg name='committed_text' type='s' direction='out'/>"
+  "  </method>"
   "  <method name='Reset'/>"
+  "  <method name='ResetSync'>"
+  "   <arg name='committed_text' type='s' direction='out'/>"
+  "  </method>"
   "  <method name='SetCursorLocation'>"
   "   <arg name='x' type='i' direction='in'/>"
   "   <arg name='y' type='i' direction='in'/>"
@@ -53,23 +68,31 @@ static const gchar introspection_xml[] =
   "   <arg name='keyval' type='u' direction='in'/>"
   "   <arg name='hardware_keycode' type='u' direction='in'/>"
   "   <arg name='state' type='u' direction='in'/>"
+  "   <arg name='focus_generation' type='u' direction='in'/>"
   "   <arg name='press' type='b' direction='in'/>"
   "   <arg name='handled' type='b' direction='out'/>"
   "  </method>"
   "  <signal name='Commit'>"
   "   <arg name='text' type='s'/>"
+  "   <arg name='focus_generation' type='u'/>"
   "  </signal>"
   "  <signal name='Preedit'>"
   "   <arg name='text' type='s'/>"
   "   <arg name='cursor' type='u'/>"
   "   <arg name='visible' type='b'/>"
+  "   <arg name='focus_generation' type='u'/>"
   "  </signal>"
   "  <signal name='DeleteSurrounding'>"
   "   <arg name='offset' type='i'/>"
   "   <arg name='n_chars' type='u'/>"
+  "   <arg name='focus_generation' type='u'/>"
   "  </signal>"
-  "  <signal name='RequestSurrounding'/>"
-  "  <signal name='Beep'/>"
+  "  <signal name='RequestSurrounding'>"
+  "   <arg name='focus_generation' type='u'/>"
+  "  </signal>"
+  "  <signal name='Beep'>"
+  "   <arg name='focus_generation' type='u'/>"
+  "  </signal>"
   " </interface>"
   "</node>";
 
@@ -96,11 +119,65 @@ emit_signal (Bridge *bridge, const gchar *name, GVariant *parameters)
   return TRUE;
 }
 
+static void emit_preedit (Bridge *bridge, gboolean visible);
+
+static void
+emit_commit (Bridge *bridge, const gchar *text)
+{
+  emit_signal (bridge,
+               "Commit",
+               g_variant_new ("(su)",
+                              text ? text : "",
+                              bridge->focus_generation));
+}
+
+static void
+discard_deferred_commit (Bridge *bridge)
+{
+  if (bridge->deferred_commit_timeout_id)
+    g_source_remove (bridge->deferred_commit_timeout_id);
+  bridge->deferred_commit_timeout_id = 0;
+  bridge->deferred_preedit = FALSE;
+  g_clear_pointer (&bridge->deferred_commit, g_free);
+}
+
+static void
+flush_deferred_commit (Bridge *bridge, gboolean flush_preedit)
+{
+  g_autofree gchar *text = NULL;
+  gboolean preedit_pending;
+
+  if (bridge->deferred_commit_timeout_id)
+    g_source_remove (bridge->deferred_commit_timeout_id);
+  bridge->deferred_commit_timeout_id = 0;
+  text = g_steal_pointer (&bridge->deferred_commit);
+  preedit_pending = bridge->deferred_preedit;
+  bridge->deferred_preedit = FALSE;
+
+  if (text)
+    emit_commit (bridge, text);
+  if (flush_preedit && preedit_pending)
+    emit_preedit (bridge, bridge->preedit_visible);
+}
+
+static gboolean
+deferred_commit_timeout_cb (gpointer user_data)
+{
+  Bridge *bridge = user_data;
+
+  bridge->deferred_commit_timeout_id = 0;
+  flush_deferred_commit (bridge, TRUE);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 emit_preedit (Bridge *bridge, gboolean visible)
 {
   gchar *text = NULL;
   gint cursor = 0;
+
+  if (bridge->transition_in_progress)
+    return;
 
   if (visible)
     nimf_im_get_preedit_info (bridge->im, &text, NULL, &cursor);
@@ -108,9 +185,25 @@ emit_preedit (Bridge *bridge, gboolean visible)
   if (!text)
     text = calloc (1, 1);
 
+  if (bridge->deferred_commit)
+    {
+      if (!visible || text[0] == '\0')
+        {
+          bridge->deferred_preedit = TRUE;
+          free (text);
+          return;
+        }
+
+      flush_deferred_commit (bridge, FALSE);
+    }
+
   emit_signal (bridge,
                "Preedit",
-               g_variant_new ("(sub)", text, (guint) MAX (cursor, 0), visible));
+               g_variant_new ("(subu)",
+                              text,
+                              (guint) MAX (cursor, 0),
+                              visible,
+                              bridge->focus_generation));
   free (text);
 }
 
@@ -141,7 +234,47 @@ static void
 on_commit (NimfIM *im, const gchar *text, Bridge *bridge)
 {
   (void) im;
-  emit_signal (bridge, "Commit", g_variant_new ("(s)", text ? text : ""));
+
+  if (bridge->transition_in_progress)
+    {
+      gchar *combined = g_strconcat (bridge->transition_commit ?: "",
+                                     text ?: "",
+                                     NULL);
+
+      g_free (bridge->transition_commit);
+      bridge->transition_commit = combined;
+      return;
+    }
+
+  if (bridge->filtering_key_event)
+    {
+      /* A commit produced synchronously by a key is ordinary input. */
+      emit_commit (bridge, text);
+      return;
+    }
+
+  /*
+   * Nimf can commit the last preedit just before Mutter sends Reset while a
+   * pointer focus change is in flight. Mutter's COMMIT reset mode has already
+   * put that text in the old client, so wait for the ordering event instead
+   * of forwarding this possible duplicate to whichever client is focused
+   * next. Candidate-click and other genuine out-of-key commits are released
+   * by a following preedit or by the short fallback timer.
+   */
+  {
+    gchar *combined = g_strconcat (bridge->deferred_commit ?: "",
+                                   text ?: "",
+                                   NULL);
+
+    g_free (bridge->deferred_commit);
+    bridge->deferred_commit = combined;
+  }
+  if (bridge->deferred_commit_timeout_id)
+    g_source_remove (bridge->deferred_commit_timeout_id);
+  bridge->deferred_commit_timeout_id =
+    g_timeout_add (COMMIT_SETTLE_TIMEOUT_MS,
+                   deferred_commit_timeout_cb,
+                   bridge);
 }
 
 static gboolean
@@ -156,7 +289,9 @@ on_retrieve_surrounding (NimfIM *im, Bridge *bridge)
       return TRUE;
     }
 
-  emit_signal (bridge, "RequestSurrounding", NULL);
+  emit_signal (bridge,
+               "RequestSurrounding",
+               g_variant_new ("(u)", bridge->focus_generation));
   return FALSE;
 }
 
@@ -173,14 +308,19 @@ on_delete_surrounding (NimfIM *im,
 
   return emit_signal (bridge,
                       "DeleteSurrounding",
-                      g_variant_new ("(iu)", offset, (guint) n_chars));
+                      g_variant_new ("(iuu)",
+                                     offset,
+                                     (guint) n_chars,
+                                     bridge->focus_generation));
 }
 
 static void
 on_beep (NimfIM *im, Bridge *bridge)
 {
   (void) im;
-  emit_signal (bridge, "Beep", NULL);
+  emit_signal (bridge,
+               "Beep",
+               g_variant_new ("(u)", bridge->focus_generation));
 }
 
 static gint
@@ -199,6 +339,25 @@ static void
 return_void (GDBusMethodInvocation *invocation)
 {
   g_dbus_method_invocation_return_value (invocation, NULL);
+}
+
+static void
+begin_transition (Bridge *bridge)
+{
+  discard_deferred_commit (bridge);
+  g_clear_pointer (&bridge->transition_commit, g_free);
+  bridge->transition_in_progress = TRUE;
+}
+
+static void
+return_transition_commit (Bridge *bridge,
+                          GDBusMethodInvocation *invocation)
+{
+  bridge->transition_in_progress = FALSE;
+  g_dbus_method_invocation_return_value (
+    invocation,
+    g_variant_new ("(s)", bridge->transition_commit ?: ""));
+  g_clear_pointer (&bridge->transition_commit, g_free);
 }
 
 static void
@@ -222,7 +381,7 @@ handle_method_call (GDBusConnection *connection,
     {
       g_dbus_method_invocation_return_value (
         invocation,
-        g_variant_new ("(ss)", "1", "nimf-2022.03.05-legacy"));
+        g_variant_new ("(ss)", "2", "nimf-2022.03.05-legacy"));
     }
   else if (g_str_equal (method_name, "FocusIn"))
     {
@@ -235,19 +394,43 @@ handle_method_call (GDBusConnection *connection,
     }
   else if (g_str_equal (method_name, "FocusOut"))
     {
+      begin_transition (bridge);
       if (bridge->focused)
         {
           nimf_im_focus_out (bridge->im);
           bridge->focused = FALSE;
         }
       bridge->preedit_visible = FALSE;
+      bridge->transition_in_progress = FALSE;
+      g_clear_pointer (&bridge->transition_commit, g_free);
       return_void (invocation);
+    }
+  else if (g_str_equal (method_name, "FocusOutSync"))
+    {
+      begin_transition (bridge);
+      if (bridge->focused)
+        {
+          nimf_im_focus_out (bridge->im);
+          bridge->focused = FALSE;
+        }
+      bridge->preedit_visible = FALSE;
+      return_transition_commit (bridge, invocation);
     }
   else if (g_str_equal (method_name, "Reset"))
     {
+      begin_transition (bridge);
       nimf_im_reset (bridge->im);
       bridge->preedit_visible = FALSE;
+      bridge->transition_in_progress = FALSE;
+      g_clear_pointer (&bridge->transition_commit, g_free);
       return_void (invocation);
+    }
+  else if (g_str_equal (method_name, "ResetSync"))
+    {
+      begin_transition (bridge);
+      nimf_im_reset (bridge->im);
+      bridge->preedit_visible = FALSE;
+      return_transition_commit (bridge, invocation);
     }
   else if (g_str_equal (method_name, "SetCursorLocation"))
     {
@@ -318,21 +501,26 @@ handle_method_call (GDBusConnection *connection,
       guint keyval;
       guint keycode;
       guint state;
+      guint focus_generation;
       gboolean press;
       gboolean handled;
 
       g_variant_get (parameters,
-                     "(uuub)",
+                     "(uuuub)",
                      &keyval,
                      &keycode,
                      &state,
+                     &focus_generation,
                      &press);
+      bridge->focus_generation = focus_generation;
       event.type = press ? NIMF_LEGACY_EVENT_KEY_PRESS
                          : NIMF_LEGACY_EVENT_KEY_RELEASE;
       event.state = state & NIMF_MODIFIER_MASK;
       event.keyval = keyval;
       event.hardware_keycode = keycode;
+      bridge->filtering_key_event = TRUE;
       handled = nimf_im_filter_event (bridge->im, &event);
+      bridge->filtering_key_event = FALSE;
       g_dbus_method_invocation_return_value (invocation,
                                              g_variant_new ("(b)", handled));
     }
@@ -497,8 +685,10 @@ main (int argc, char **argv)
   if (bridge.owner_id)
     g_bus_unown_name (bridge.owner_id);
   g_clear_object (&bridge.connection);
+  discard_deferred_commit (&bridge);
   nimf_im_free (bridge.im);
   g_free (bridge.surrounding_text);
+  g_free (bridge.transition_commit);
   g_dbus_node_info_unref (bridge.introspection);
   g_main_loop_unref (bridge.loop);
 

@@ -1,7 +1,6 @@
 # Nimf GNOME Shell bridge
 
 A bridge adapter for Nimf and GNOME Shell 42 or 46 Wayland.
-For applications which are using text-input-v3 within GNOME Mutter.
 
 ## Prequisite
 * https://nimfsoft.art/nimf
